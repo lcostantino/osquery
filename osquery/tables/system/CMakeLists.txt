@@ -275,7 +275,8 @@ function(generateOsqueryTablesSystemSystemtable)
     )
   else()
     target_link_libraries(osquery_tables_system_systemtable PRIVATE
-      osquery_system_usersgroups_caches
+      osquery_system_usersgroups_caches 
+      osquery_utils_system_processeshelpers
     )
   endif()
 

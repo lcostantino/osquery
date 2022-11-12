@@ -25,6 +25,7 @@ function(osqueryUtilsSystemMain)
 
   if(DEFINED PLATFORM_WINDOWS)
     generateOsqueryUtilsSystemUsersGroups()
+    generateOsqueryUtilsSystemProcesses()
   endif()
 endfunction()
 
@@ -259,6 +260,24 @@ function(generateOsqueryUtilsSystemUsersGroups)
 
   generateIncludeNamespace(osquery_utils_system_usersgroupshelpers "osquery/utils/system" "FULL_PATH" ${public_header_files})
 endfunction()
+
+function(generateOsqueryUtilsSystemProcesses)
+  add_osquery_library(osquery_utils_system_processeshelpers EXCLUDE_FROM_ALL
+    windows/processes.cpp
+  )
+
+  target_link_libraries(osquery_utils_system_processeshelpers PUBLIC
+    osquery_cxx_settings
+    osquery_utils_conversions
+  )
+
+  set(public_header_files
+    windows/processes.h
+  )
+
+  generateIncludeNamespace(osquery_utils_system_processeshelpers "osquery/utils/system" "FULL_PATH" ${public_header_files})
+endfunction()
+
 
 function(generateOsqueryUtilsSystemErrnoErrnotestsTest)
 

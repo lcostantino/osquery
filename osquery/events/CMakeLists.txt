@@ -58,6 +58,7 @@ function(generateOsqueryEvents)
       windows/ntfs_event_publisher.cpp
       windows/usn_journal_reader.cpp
       windows/windowseventlogpublisher.cpp
+      windows/etweventpublisher.cpp
       windows/windowseventlogparserservice.cpp
       windows/windowseventlogparser.cpp
     )
@@ -151,11 +152,14 @@ function(generateOsqueryEvents)
   elseif(DEFINED PLATFORM_WINDOWS)
     set(platform_public_header_files
       windows/evtsubscription.h
+      windows/etweventpublisher.h
       windows/ntfs_event_publisher.h
       windows/usn_journal_reader.h
       windows/windowseventlogpublisher.h
       windows/windowseventlogparserservice.h
       windows/windowseventlogparser.h
+      windows/krabs/krabs.hpp
+      windows/krabs/krabs/
     )
   endif()
 

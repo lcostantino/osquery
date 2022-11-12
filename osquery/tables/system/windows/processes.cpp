@@ -40,6 +40,7 @@
 #include <osquery/utils/conversions/windows/strings.h>
 #include <osquery/utils/conversions/windows/windows_time.h>
 #include <osquery/utils/scope_guard.h>
+#include <osquery/utils/system/windows/processes.h>
 #include <osquery/utils/system/windows/users_groups_helpers.h>
 
 namespace osquery {
@@ -59,126 +60,6 @@ const std::map<unsigned long, std::string> kMemoryConstants = {
     {PAGE_WRITECOMBINE, "PAGE_WRITECOMBINE"},
 };
 
-const unsigned long kMaxPathSize = 0x1000;
-
-// See the Process Hacker implementation for more details on the hard coded 60
-// https://github.com/processhacker/processhacker/blob/master/phnt/include/ntpsapi.h#L160
-const PROCESSINFOCLASS ProcessCommandLine = static_cast<PROCESSINFOCLASS>(60);
-// See the ZwQueryInformatioNprocess docs for more details on the hard coded 61
-// https://docs.microsoft.com/en-us/windows/win32/procthread/zwqueryinformationprocess
-const PROCESSINFOCLASS ProcessProtectionInformation =
-    static_cast<PROCESSINFOCLASS>(61);
-
-typedef struct {
-  USHORT Length;
-  USHORT MaximumLength;
-  PWSTR Buffer;
-} UNICODE_STRING, *PUNICODE_STRING;
-
-typedef struct _RTL_USER_PROCESS_PARAMETERS {
-  ULONG MaximumLength;
-  ULONG Length;
-  ULONG Flags;
-  ULONG DebugFlags;
-  PVOID ConsoleHandle;
-  ULONG ConsoleFlags;
-  HANDLE StdInputHandle;
-  HANDLE StdOutputHandle;
-  HANDLE StdErrorHandle;
-  UNICODE_STRING CurrentDirectoryPath;
-  HANDLE CurrentDirectoryHandle;
-  UNICODE_STRING DllPath;
-  UNICODE_STRING ImagePathName;
-  UNICODE_STRING CommandLine;
-} RTL_USER_PROCESS_PARAMETERS, *PRTL_USER_PROCESS_PARAMETERS;
-
-typedef struct _PEB {
-  BYTE Reserved1[2];
-  BYTE BeingDebugged;
-  BYTE Reserved2[1];
-  PVOID Reserved3[2];
-  PPEB_LDR_DATA Ldr;
-  PRTL_USER_PROCESS_PARAMETERS ProcessParameters;
-  PVOID Reserved4[3];
-  PVOID AtlThunkSListPtr;
-  PVOID Reserved5;
-  ULONG Reserved6;
-  PVOID Reserved7;
-  ULONG Reserved8;
-  ULONG AtlThunkSListPtr32;
-  PVOID Reserved9[45];
-  BYTE Reserved10[96];
-  PPS_POST_PROCESS_INIT_ROUTINE PostProcessInitRoutine;
-  BYTE Reserved11[128];
-  PVOID Reserved12[1];
-  ULONG SessionId;
-} PEB, *PPEB;
-
-typedef struct _PROCESS_BASIC_INFORMATION {
-  PVOID Reserved1;
-  PPEB PebBaseAddress;
-  PVOID Reserved2[2];
-  ULONG_PTR UniqueProcessId;
-  PVOID Reserved3;
-} PROCESS_BASIC_INFORMATION;
-
-typedef struct _PROCESS_EXTENDED_BASIC_INFORMATION {
-  SIZE_T Size; // Ignored as input, written with structure size on output
-  PROCESS_BASIC_INFORMATION BasicInfo;
-  union {
-    ULONG Flags;
-    struct {
-      ULONG IsProtectedProcess : 1;
-      ULONG IsWow64Process : 1;
-      ULONG IsProcessDeleting : 1;
-      ULONG IsCrossSessionCreate : 1;
-      ULONG IsFrozen : 1;
-      ULONG IsBackground : 1;
-      ULONG IsStronglyNamed : 1;
-      ULONG IsSecureProcess : 1;
-      ULONG IsSubsystemProcess : 1;
-      ULONG SpareBits : 23;
-    } s;
-  };
-} PROCESS_EXTENDED_BASIC_INFORMATION, *PPROCESS_EXTENDED_BASIC_INFORMATION;
-
-typedef enum _PS_PROTECTED_TYPE : UCHAR {
-  PsProtectedTypeNone,
-  PsProtectedTypeProtectedLight,
-  PsProtectedTypeProtected,
-  PsProtectedTypeMax
-} PS_PROTECTED_TYPE;
-
-const std::map<PS_PROTECTED_TYPE, std::string> kProtectedTypes = {
-    {PsProtectedTypeNone, "PsProtectedTypeNone"},
-    {PsProtectedTypeProtectedLight, "PsProtectedTypeProtectedLight"},
-    {PsProtectedTypeProtected, "PsProtectedTypeProtected"},
-    {PsProtectedTypeMax, "PsProtectedTypeMax"},
-};
-
-typedef enum _PS_PROTECTED_SIGNER : UCHAR {
-  PsProtectedSignerNone,
-  PsProtectedSignerAuthenticode,
-  PsProtectedSignerCodeGen,
-  PsProtectedSignerAntimalware,
-  PsProtectedSignerLsa,
-  PsProtectedSignerWindows,
-  PsProtectedSignerWinTcb,
-  PsProtectedSignerWinSystem,
-  PsProtectedSignerApp,
-  PsProtectedSignerMax
-} PS_PROTECTED_SIGNER;
-
-typedef struct _PS_PROTECTION {
-  union {
-    struct {
-      PS_PROTECTED_TYPE Type : 3;
-      BOOLEAN Audit : 1;
-      PS_PROTECTED_SIGNER Signer : 4;
-    } s;
-    UCHAR Level;
-  };
-} PS_PROTECTION, *PPS_PROTECTION;
 
 /// Given a pid, enumerates all loaded modules and memory pages for that process
 Status genMemoryMap(unsigned long pid, QueryData& results) {
@@ -310,120 +191,32 @@ Status getUserProcessParameters(HANDLE proc,
   return Status::success();
 }
 
-/// For legacy systems, we retrieve the commandline from the PEB
-Status getProcessCommandLineLegacy(HANDLE proc,
-                                   std::string& out,
-                                   const unsigned long pid) {
-  RTL_USER_PROCESS_PARAMETERS upp;
-  auto s = getUserProcessParameters(proc, upp, pid);
-  if (!s.ok()) {
-    VLOG(1) << "Failed to get PEB UPP for " << pid << " with "
-            << GetLastError();
-    return s;
-  }
 
-  SIZE_T bytes_read = 0;
-  std::vector<wchar_t> command_line(kMaxPathSize, 0x0);
-  SecureZeroMemory(command_line.data(), kMaxPathSize);
-  if (!ReadProcessMemory(proc,
-                         upp.CommandLine.Buffer,
-                         command_line.data(),
-                         upp.CommandLine.Length,
-                         &bytes_read)) {
-    return Status::failure("Failed to read command line for " +
-                           std::to_string(pid));
-  }
-  out = wstringToString(command_line.data());
-  return Status::success();
-}
-
-// On windows 8.1 and later, there's an enum for commandline
-Status getProcessCommandLine(HANDLE& proc,
-                             std::string& out,
-                             const unsigned long pid) {
-  unsigned long size_out = 0;
-  auto ret =
-      NtQueryInformationProcess(proc, ProcessCommandLine, NULL, 0, &size_out);
-
-  if (ret != STATUS_BUFFER_OVERFLOW && ret != STATUS_BUFFER_TOO_SMALL &&
-      ret != STATUS_INFO_LENGTH_MISMATCH) {
-    return Status::failure("NtQueryInformationProcess failed for " +
-                           std::to_string(pid) + " with " +
-                           std::to_string(ret));
-  }
-
-  std::vector<char> cmdline(size_out, 0x0);
-  ret = NtQueryInformationProcess(
-      proc, ProcessCommandLine, cmdline.data(), size_out, &size_out);
-
-  if (!NT_SUCCESS(ret)) {
-    return Status::failure("NtQueryInformationProcess failed for " +
-                           std::to_string(pid) + " with " +
-                           std::to_string(ret));
-  }
-  auto ustr = reinterpret_cast<PUNICODE_STRING>(cmdline.data());
-  out = wstringToString(ustr->Buffer);
-  return Status::success();
-}
-
-// Regardless of the Windows version, the CWD of a process is only possible to
-// retrieve by reading it from the process's PEB structure.
-Status getProcessCurrentDirectory(HANDLE proc,
-                                  std::string& out,
-                                  const unsigned long pid) {
-  RTL_USER_PROCESS_PARAMETERS upp;
-  auto s = getUserProcessParameters(proc, upp, pid);
-  if (!s.ok()) {
-    VLOG(1) << "Failed to get PEB UPP for " << pid << " with "
-            << GetLastError();
-    return s;
-  }
-
-  SIZE_T bytes_read = 0;
-  std::vector<wchar_t> current_directory(kMaxPathSize, 0x0);
-  SecureZeroMemory(current_directory.data(), kMaxPathSize);
-  if (!ReadProcessMemory(proc,
-                         upp.CurrentDirectoryPath.Buffer,
-                         current_directory.data(),
-                         upp.CurrentDirectoryPath.Length,
-                         &bytes_read)) {
-    return Status::failure("Failed to read current working directory for " +
-                           std::to_string(pid));
-  }
-  out = wstringToString(current_directory.data());
-  return Status::success();
-}
 
 void getProcessPathInfo(HANDLE& proc,
                         const unsigned long pid,
                         DynamicTableRowHolder& r) {
-  auto out = kMaxPathSize;
-  std::vector<WCHAR> path(kMaxPathSize, 0x0);
-  SecureZeroMemory(path.data(), kMaxPathSize);
-  auto ret = QueryFullProcessImageNameW(proc, 0, path.data(), &out);
-  if (ret != TRUE) {
-    ret = QueryFullProcessImageNameW(
-        proc, PROCESS_NAME_NATIVE, path.data(), &out);
-  }
-  if (ret != TRUE) {
+  std::string procPath;
+  auto st = ProcessHelper::getProcessCurrentDirectory(proc, procPath, pid);
+ 
+  if (!st.success()) {
     VLOG(1) << "Failed to lookup path information for process " << pid
             << " with " << GetLastError();
   } else {
-    r["path"] = SQL_TEXT(wstringToString(path.data()));
+    r["path"] = SQL_TEXT(procPath);
+    auto const boost_path = boost::filesystem::path{procPath.data()};
+    r["on_disk"] = INTEGER(
+        boost_path.empty() ? -1 : osquery::pathExists(procPath.data()).ok());
   }
 
-  {
-    auto const boost_path = boost::filesystem::path{path.data()};
-    r["on_disk"] = INTEGER(
-        boost_path.empty() ? -1 : osquery::pathExists(path.data()).ok());
-  }
 }
 
 void getProcessCurrentDirectoryInfo(HANDLE& proc,
                                     const unsigned long pid,
                                     DynamicTableRowHolder& r) {
   std::string currDir{""};
-  auto s = getProcessCurrentDirectory(proc, currDir, pid);
+
+  auto s = ProcessHelper::getProcessCurrentDirectory(proc, currDir, pid);
   if (!s.ok()) {
     VLOG(1) << "Failed to get cwd for " << pid << " with " << GetLastError();
   } else {
@@ -432,43 +225,20 @@ void getProcessCurrentDirectoryInfo(HANDLE& proc,
   r["root"] = r["cwd"];
 }
 
-void genProcessUserTokenInfo(HANDLE& proc, DynamicTableRowHolder& r) {
+void genProcessUserTokenInfo(HANDLE& proc,
+                             const unsigned long pid, 
+                             DynamicTableRowHolder& r) {
   /// Get the process UID and GID from its SID
-  HANDLE tok = nullptr;
-  std::vector<char> tok_user(sizeof(TOKEN_USER), 0x0);
-
-  auto ret = OpenProcessToken(proc, TOKEN_READ, &tok);
-  long elevated = -1;
-  if (ret != 0 && tok != nullptr) {
-    unsigned long tokOwnerBuffLen;
-    ret = GetTokenInformation(tok, TokenUser, nullptr, 0, &tokOwnerBuffLen);
-    if (ret == 0 && GetLastError() == ERROR_INSUFFICIENT_BUFFER) {
-      tok_user.resize(tokOwnerBuffLen);
-      ret = GetTokenInformation(
-          tok, TokenUser, tok_user.data(), tokOwnerBuffLen, &tokOwnerBuffLen);
-    }
-
-    /// Check if the process is using an elevated token
-    TOKEN_ELEVATION elevation;
-    DWORD cb_size = sizeof(TOKEN_ELEVATION);
-    if (GetTokenInformation(tok,
-                            TokenElevation,
-                            &elevation,
-                            sizeof(TOKEN_ELEVATION),
-                            &cb_size)) {
-      elevated = elevation.TokenIsElevated;
-    }
-  }
-  r["elevated_token"] = INTEGER(elevated);
-  if (ret != 0 && !tok_user.empty()) {
-    auto sid = PTOKEN_OWNER(tok_user.data())->Owner;
-
-    r["uid"] = BIGINT(getRidFromSid(sid));
-    r["gid"] = BIGINT(getGidFromUserSid(sid).value_or(-1));
-  }
-  if (tok != nullptr) {
-    CloseHandle(tok);
-  }
+  PSID processSid;
+  int elevated = -1;
+  auto st = ProcessHelper::getProcessUserInfo(proc, &processSid, elevated, pid);
+  if (st.ok() && processSid) {
+    r["elevated_token"] = INTEGER(elevated);
+    r["uid"] = BIGINT(getRidFromSid(processSid));
+    r["gid"] = BIGINT(getGidFromUserSid(processSid).value_or(-1));
+    HeapFree(GetProcessHeap(), 0, (LPVOID)processSid);
+   }
+  
 }
 
 void genProcessTimeInfo(HANDLE& proc, DynamicTableRowHolder& r) {
@@ -523,22 +293,7 @@ void genProcRssInfo(HANDLE& proc, DynamicTableRowHolder& r) {
   r["total_size"] = ret == TRUE ? BIGINT(mem_ctr.PrivateUsage) : BIGINT(-1);
 }
 
-PS_PROTECTED_TYPE getProcessProtectedType(HANDLE& proc,
-                                          const unsigned long pid) {
-  PS_PROTECTION psp{0};
-  unsigned long len{0};
-  PROCESS_EXTENDED_BASIC_INFORMATION pebi{0};
-  NTSTATUS status = NtQueryInformationProcess(
-      proc, ProcessProtectionInformation, &psp, sizeof(psp), &len);
-  if (NT_SUCCESS(status)) {
-    return psp.s.Type;
-  }
-  if (status != STATUS_INVALID_INFO_CLASS) {
-    VLOG(1) << "Failed to get process protection type " << pid << " with "
-            << status;
-  }
-  return PS_PROTECTED_TYPE::PsProtectedTypeNone;
-}
+
 
 TableRows genProcesses(QueryContext& context) {
   TableRows results;
@@ -624,14 +379,9 @@ TableRows genProcesses(QueryContext& context) {
       continue;
     }
 
-    auto proc_handle = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
+    auto proc_handle = ProcessHelper::getProcessHandle(pid);
     auto const proc_handle_manager =
         scope_guard::create([&proc_handle]() { CloseHandle(proc_handle); });
-
-    // If we fail to get all privs, open with less permissions
-    if (proc_handle == NULL) {
-      proc_handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-    }
 
     if (proc_handle == NULL) {
       VLOG(1) << "Failed to open handle to process " << pid << " with "
@@ -644,61 +394,47 @@ TableRows genProcesses(QueryContext& context) {
     auto nice = GetPriorityClass(proc_handle);
     r["nice"] = nice != FALSE ? INTEGER(nice) : "-1";
 
-    auto protection = getProcessProtectedType(proc_handle, pid);
-    r["protection_type"] = SQL_TEXT(kProtectedTypes.at(protection));
-
-    bool isProtectedProcess =
-        protection != PS_PROTECTED_TYPE::PsProtectedTypeNone;
-    bool isSecureProcess = false;
-    bool isVirtualProcess = false;
-    {
-      PROCESS_EXTENDED_BASIC_INFORMATION pebi{0};
-      unsigned long len{0};
-      NTSTATUS status = NtQueryInformationProcess(
-          proc_handle, ProcessBasicInformation, &pebi, sizeof(pebi), &len);
-      // Handle return on pre Windows 8.1 and just populate the non extended
-      // ProcessBasicInformation variant
-      if (status == STATUS_INFO_LENGTH_MISMATCH) {
-        status = NtQueryInformationProcess(proc_handle,
-                                           ProcessBasicInformation,
-                                           &pebi.BasicInfo,
-                                           sizeof(pebi.BasicInfo),
-                                           &len);
-      }
-      if (NT_SUCCESS(status)) {
-        isSecureProcess = pebi.s.IsSecureProcess;
-        r["secure_process"] = BIGINT(isSecureProcess);
-        isVirtualProcess = pebi.BasicInfo.PebBaseAddress == NULL;
-        r["virtual_process"] = BIGINT(isVirtualProcess);
-      } else {
-        VLOG(1) << "Failed to query ProcessBasicInformation for pid "
-                << proc.th32ProcessID << " with " << status;
-      }
+    ProcessHelper::PS_PROTECTED_TYPE protectionType =
+        ProcessHelper::PS_PROTECTED_TYPE::PsProtectedTypeNone;
+    auto st = ProcessHelper::getProcessProtectedType(proc_handle, protectionType, pid);
+    if (st.ok()) {
+      r["protection_type"] =
+            SQL_TEXT(ProcessHelper::getProtectedTypeAsString(protectionType));
     }
 
+    bool isProtectedProcess =
+          protectionType != ProcessHelper::PS_PROTECTED_TYPE::PsProtectedTypeNone;
+
+    ProcessHelper::EXTENDED_INFO extInfo;
+    st = ProcessHelper::getProcessExtendedInfo(proc_handle, extInfo, pid);
+    if (st.ok()) {
+      r["secure_process"] = BIGINT(extInfo.isSecure);
+      r["virtual_process"] = BIGINT(extInfo.isVirtual);
+    }
     if (context.isAnyColumnUsed({"path", "on_disk"})) {
       getProcessPathInfo(proc_handle, pid, r);
     }
 
     if (context.isAnyColumnUsed({"cwd", "root"}) && !isProtectedProcess &&
-        !isSecureProcess && !isVirtualProcess) {
+        !extInfo.isSecure && !extInfo.isVirtual) {
       getProcessCurrentDirectoryInfo(proc_handle, pid, r);
     }
 
-    if (context.isColumnUsed("cmdline") && !isSecureProcess &&
-        !isVirtualProcess) {
+    if (context.isColumnUsed("cmdline") && !extInfo.isSecure &&
+        !extInfo.isVirtual) {
       std::string cmd{""};
-      auto s = getProcessCommandLine(
+      auto s = ProcessHelper::getProcessCommandLine(
           proc_handle, cmd, static_cast<unsigned long>(proc.th32ProcessID));
       if (!s.ok()) {
-        s = getProcessCommandLineLegacy(
+        s = ProcessHelper::getProcessCommandLineLegacy(
             proc_handle, cmd, static_cast<unsigned long>(proc.th32ProcessID));
       }
       r["cmdline"] = cmd;
     }
 
     if (context.isAnyColumnUsed({"uid", "gid", "elevated_token"})) {
-      genProcessUserTokenInfo(proc_handle, r);
+      genProcessUserTokenInfo(proc_handle,
+                              static_cast<unsigned long>(proc.th32ProcessID), r);
     }
 
     if (context.isAnyColumnUsed({"user_time",

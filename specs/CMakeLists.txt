@@ -233,7 +233,7 @@ function(generateNativeTables)
     "posix/oem_strings.table:linux,macos"
     "posix/pci_devices.table:linux,macos"
     "posix/process_envs.table:linux,macos,freebsd"
-    "posix/process_events.table:linux,macos,freebsd"
+    "posix/process_events.table:linux,macos,freebsd,windows"
     "posix/process_open_files.table:linux,macos,freebsd"
     "posix/process_open_pipes.table:linux"
     "posix/prometheus_metrics.table:linux,macos,freebsd"

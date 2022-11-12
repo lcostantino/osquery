@@ -56,6 +56,7 @@ function(generateOsqueryTablesEventsEventstable)
       windows/ntfs_journal_events.cpp
       windows/powershell_events.cpp
       windows/windows_events.cpp
+      windows/process_events.cpp
     )
   endif()
 
@@ -84,8 +85,8 @@ function(generateOsqueryTablesEventsEventstable)
 
   if(DEFINED PLATFORM_WINDOWS)
     target_link_libraries(osquery_tables_events_eventstable PUBLIC osquery_utils_json)
+    target_link_libraries(osquery_tables_events_eventstable PUBLIC osquery_utils_system_processeshelpers)
   endif()
-
   set(public_header_files
     event_utils.h
   )
@@ -116,6 +117,7 @@ function(generateOsqueryTablesEventsEventstable)
       windows/ntfs_journal_events.h
       windows/powershell_events.h
       windows/windows_events.h
+      windows/process_events.h
     )
 
     generateIncludeNamespace(osquery_tables_events_eventstable "osquery/tables/events" "FULL_PATH" ${platform_public_header_files})
