@@ -32,7 +32,7 @@ REGISTER(EtwProcessEventSubscriber, "event_subscriber", "process_events");
 Status EtwProcessEventSubscriber::init() {
 
   if (!FLAGS_etw_process_events) {
-    return Status(1, "Subscriber disabled via configuration");
+    return Status(1, "ETW Process Events Subscriber disabled via configuration");
   }
   
   auto sc = createSubscriptionContext();

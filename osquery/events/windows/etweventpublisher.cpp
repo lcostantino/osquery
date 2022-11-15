@@ -17,6 +17,8 @@
 
 namespace osquery {
 
+#define PROCESS_PROVIDER_GUID L"{22fb2cd6-0e7b-422b-a0c7-2fad1fd0e716}"
+
 FLAG(bool,
      enable_windows_etw_publisher,
      false,
@@ -26,15 +28,9 @@ REGISTER(EtwEventPublisher,
          "event_publisher",
          "EtwEventPublisher");
 
-struct EtwEventPublisher::PrivateData final {
-    
+struct EtwEventPublisher::PrivateData final {};
 
-};
-
-
-EtwEventPublisher::EtwEventPublisher() : d_(new PrivateData) {
-  LOG(ERROR) << "ETW Evenbt Publisher CTOR";
-}
+EtwEventPublisher::EtwEventPublisher() : d_(new PrivateData) {}
 
 EtwEventPublisher::~EtwEventPublisher() {}
 
@@ -42,7 +38,6 @@ void EtwEventPublisher::configure() {
   if (!FLAGS_enable_windows_etw_publisher) {
     return;
   }
-  LOG(ERROR) << "Configure";
   tearDown();
   if (!trace) {
    //Yes, i'm using the user_trace instead of kernel_trace 
@@ -55,12 +50,10 @@ Status EtwEventPublisher::run() {
   if (!FLAGS_enable_windows_etw_publisher) {
     return Status::failure("Publisher etw disabled by configuration");
   }
-
-  LOG(ERROR) << "ETW RUN";
   //The kernel provider is not providing all the fields (or the same) than when using the kernel provider id. 
   //ImagePath & CreateTime for instance. CMDLine is provided by the kernel provider, but we can obtain that with post-processing.
 
-  krabs::provider<> provider(krabs::guid(L"{22fb2cd6-0e7b-422b-a0c7-2fad1fd0e716}"));
+  krabs::provider<> provider(krabs::guid(PROCESS_PROVIDER_GUID));
 
   provider.add_on_event_callback(
       [&](const EVENT_RECORD& record,
@@ -70,31 +63,23 @@ Status EtwEventPublisher::run() {
         if (schema.event_id() != 1) {
           return;
         }
-        LOG(ERROR) << "ETW es Event ID " << schema.event_id()
-                   << " OPCODE: " << schema.provider_name();
-
         try {
           krabs::parser parser(schema);
           struct ProcessData p;
 
           if (schema.event_id() == 1) {
-        
-//            for (auto pp : parser.properties()) {
-
-  //            printf("Property Name [%ws]\n", pp.name().c_str());
-    //        }
-
+  
             p.pid = parser.parse<uint32_t>(L"ProcessID");
             p.parentPid = parser.parse<uint32_t>(L"ParentProcessID");
             p.imageName =
                 wstringToString(parser.parse<std::wstring>(L"ImageName"));
             p.sessionId = parser.parse<uint32_t>(L"SessionID");
             p.createTime = filetimeToUnixtime(parser.parse<FILETIME>(L"CreateTime"));
-            {
-              std::unique_lock<std::mutex> queue_lock(queue_events_mutex);
-              this->queue_events.push_back(std::move(p));
-              this->queue_events_cv.notify_one();
-            }
+          
+            const std::lock_guard<std::mutex> lock(queue_events_mutex);
+            this->queue_events.push_back(std::move(p));
+            this->queue_events_cv.notify_one();
+           
           }
         } catch (const std::exception& e) {
           LOG(ERROR) << "Exception " << e.what();
@@ -102,17 +87,16 @@ Status EtwEventPublisher::run() {
       });
   // From here on out, a kernel_trace is indistinguishable from a user_trace in
   // how it is used.
-  
     auto procStartId = krabs::predicates::id_is(1);
-    auto procFinishId = krabs::predicates::id_is(2); //can be 3 too...
+    auto procFinishId = krabs::predicates::id_is(2);
 
     provider.add_filter(krabs::event_filter(
       krabs::predicates::any_of({&procStartId, &procFinishId})));
 
     trace->enable(provider);
-    //this should be in it's own thread...
-  
-    std::thread ts([&]() { trace->start(); });
+    std::thread ts([&]() {
+      trace->start();
+    });
     ts.detach();
    
     std::unique_lock<std::mutex> queue_lock(queue_events_mutex);
@@ -122,25 +106,13 @@ Status EtwEventPublisher::run() {
                 queue_lock, std::chrono::seconds(5), [this]() {
                     return !this->queue_events.empty();
                 });
-
-    if (should_process_events) {
-    
-            //probar despue en x64 
-    //       queue_lock.lock();
-           // printf("Lock Queue\n");
-            auto event_context = createEventContext();
-            printf("Move Events\n");
-            event_context->events = std::move(this->queue_events);
-            this->queue_events.clear();
-            printf("Move Events\n");
-            fire(event_context);
-            printf("Fired Events\n");
-           ////       queue_lock.unlock();
-          printf("PROCESS EVENTS Done");
-      
-    }
+        if (should_process_events) {
+                auto event_context = createEventContext();
+                event_context->events = std::move(this->queue_events);
+                this->queue_events.clear();
+                fire(event_context);  
+        }
   }
-
   return Status::success();
 }
 
